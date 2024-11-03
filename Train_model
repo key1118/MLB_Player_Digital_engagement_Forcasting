@@ -1,0 +1,77 @@
+#学習モデル
+def train_lgb(input_x,
+              input_y,
+              input_id,
+              params,
+              list_nfold=[0,1,2],
+              mode_train="train",
+             ):
+    # 推論値を格納する変数の作成
+    df_valid_pred = pd.DataFrame()
+    # 評価値を入れる変数の作成
+    metrics = []
+    # 重要度を格納するデータフレームの作成
+    df_imp = pd.DataFrame() 
+
+    # validation
+    cv = []
+    for month_tr, month_va in list_cv_month:
+        cv.append([
+            input_id.index[input_id["yearmonth"].isin(month_tr)],
+            input_id.index[input_id["yearmonth"].isin(month_va) & (input_id["playerForTestSetAndFuturePreds"]==1)],
+        ])
+    # モデル学習 (target/foldごとに学習)
+    for nfold in list_nfold:
+        for i, target in enumerate(["target1", "target2", "target3", "target4"]):
+            print("-"*20, target, ", fold:", nfold, "-"*20)
+            # trainとvalid1に分離
+            idx_tr, idx_va = cv[nfold][0], cv[nfold][1]
+            x_tr, y_tr, id_tr = x_train.loc[idx_tr, :], y_train.loc[idx_tr, target], id_train.loc[idx_tr, :]
+            x_va, y_va, id_va = x_train.loc[idx_va, :], y_train.loc[idx_va, target], id_train.loc[idx_va, :]
+            print(x_tr.shape, y_tr.shape, id_tr.shape)
+            print(x_va.shape, y_va.shape, id_va.shape)
+            
+            # 保存するモデルのファイル名
+            filepath = "model_lgb_{}_fold{}.h5".format(target, nfold)
+
+            if mode_train=="train":
+                print("training start.")
+                model = lgb.LGBMRegressor(**params)
+                model.fit(x_tr,
+                          y_tr,
+                          eval_set=[(x_tr,y_tr), (x_va,y_va)],
+                          callbacks=[lgb.early_stopping(stopping_rounds=50), lgb.log_evaluation(100)])
+                with open(filepath, "wb") as f:
+                    pickle.dump(model, f, protocol=4)
+            else:
+                print("model load.")
+                with open(filepath, "rb") as f:
+                    model = pickle.load(f)
+                print("Done.")
+                
+            # validの推論値取得
+            y_va_pred = model.predict(x_va)
+            tmp_pred = pd.concat([
+                id_va,
+                pd.DataFrame({"target": target, "nfold": 0, "true": y_va, "pred": y_va_pred}),
+            ], axis=1)
+            df_valid_pred = pd.concat([df_valid_pred, tmp_pred], axis=0, ignore_index=True)
+            
+            # 評価値の算出
+            metric_va = mean_absolute_error(y_va, y_va_pred)
+            metrics.append([target, nfold, metric_va])
+            # 重要度の取得
+            tmp_imp = pd.DataFrame({"col":x_tr.columns, "imp":model.feature_importances_, "target":target, "nfold":nfold})
+            df_imp = pd.concat([df_imp, tmp_imp], axis=0, ignore_index=True)
+        
+    print("-"*10, "result", "-"*10)
+    # 評価値
+    df_metrics = pd.DataFrame(metrics, columns=["target", "nfold", "mae"])
+    print("MCMAE: {:.4f}".format(df_metrics["mae"].mean()))
+    
+    # validの推論値
+    df_valid_pred_all = pd.pivot_table(df_valid_pred, index=["engagementMetricsDate","playerId","date_playerId","date","yearmonth","playerForTestSetAndFuturePreds"], columns=["target",  "nfold"], values=["true", "pred"], aggfunc=np.sum)
+    df_valid_pred_all.columns = ["{}_fold{}_{}".format(j,k,i) for i,j,k in df_valid_pred_all.columns]
+    df_valid_pred_all = df_valid_pred_all.reset_index(drop=False)
+
+    return df_valid_pred_all, df_metrics, df_imp
